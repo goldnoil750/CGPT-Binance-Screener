@@ -5,42 +5,38 @@ import cors from "cors";
 const app = express();
 app.use(cors());
 
-// ✅ You can expand this list later
+// ✅ Limit temporarily for testing (Render free tier timing)
 const pairs = [
-  "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT",
-  "HEMIUSDT","WIFUSDT","PEPEUSDT","BONKUSDT","FLOKIUSDT","SHIBUSDT",
-  "1000RATSUSDT","TURBOUSDT","BRETTUSDT","POPCATUSDT","MEWUSDT",
-  "JUPUSDT","PYTHUSDT"
+  "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+  "DOGEUSDT", "ADAUSDT", "PEPEUSDT", "SHIBUSDT", "BONKUSDT"
 ];
 
-// ✅ Helper Functions
-const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const bodyPct = (c) => Math.abs(((parseFloat(c[4]) - parseFloat(c[1])) / parseFloat(c[1])) * 100);
 const volume = (c) => parseFloat(c[5]);
 
-// ✅ FIXED: handles Binance binary / invalid responses
+// ✅ Binance safe fetch
 async function getKlines(symbol, tf) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
   const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${tf}&limit=3`;
   try {
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, signal: controller.signal });
     const text = await res.text();
-    try {
-      return JSON.parse(text);
-    } catch {
-      console.log(`Invalid JSON for ${symbol}:`, text.slice(0, 100));
-      return [];
-    }
+    clearTimeout(timeout);
+    return JSON.parse(text);
   } catch (e) {
-    console.log(`${symbol} fetch error: ${e.message}`);
+    console.log(`❌ ${symbol} fetch error: ${e.message}`);
     return [];
   }
 }
 
-// ✅ Main Route
 app.get("/", async (req, res) => {
   const now = new Date();
   const mins = (30 - (now.getUTCMinutes() % 30)) % 30;
   const secs = 60 - now.getUTCSeconds();
+
+  console.log("🚀 Starting scan at", now.toISOString());
 
   let html = `
   <body style="background:black;color:#0f0;font-family:monospace;font-size:20px;">
@@ -52,7 +48,7 @@ ${"─".repeat(52)}\n`;
   const hits = [];
 
   for (const s of pairs) {
-    await sleep(200);
+    console.log("🔍 Checking", s);
     const d = await getKlines(s, "30m");
     if (d.length < 3) continue;
 
@@ -61,10 +57,12 @@ ${"─".repeat(52)}\n`;
     const body = bodyPct(cur);
     const volCur = volume(cur);
     const volPrev = volume(pre);
+
     if (parseFloat(cur[4]) > parseFloat(cur[1]) && body >= 2) {
       const ratio = volPrev ? (volCur / volPrev).toFixed(2) : "999";
       hits.push({ s, body: body.toFixed(2), volCur, volPrev, ratio });
     }
+    await sleep(100); // small pause
   }
 
   hits.sort((a, b) => b.ratio - a.ratio);
@@ -72,9 +70,7 @@ ${"─".repeat(52)}\n`;
     html += `${h.s.padEnd(10)} ${h.body}%   ${(h.volCur/1e6).toFixed(1)}M   ${(h.volPrev/1e6).toFixed(1)}M   ${h.ratio}x\n`;
   }
 
-  if (hits.length === 0) {
-    html += "No GREEN ≥2% candle in last 30 min\n";
-  }
+  if (hits.length === 0) html += "No GREEN ≥2% candle in last 30 min\n";
 
   html += `
   \nRefresh every <input id=s value=60 size=2> sec 
@@ -89,9 +85,9 @@ ${"─".repeat(52)}\n`;
   let i=setInterval(go,60000);
   </script></pre></body>`;
 
+  console.log("✅ Scan complete with", hits.length, "hits");
   res.send(html);
 });
 
-// ✅ Render / Localhost port
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`✅ Screener running on port ${PORT}`));
