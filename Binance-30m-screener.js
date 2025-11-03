@@ -1,32 +1,39 @@
-// --- Binance data fetch ---
-async function getKlines(symbol, interval = '30m', limit = 3) {
+// test-binance.js
+import fetch from "node-fetch";  // or remove this line if using browser-side JS
+
+async function testBinance() {
+  const symbol = "BTCUSDT"; // try also BTCUSDT.P if needed
+  const interval = "30m";
+  const limit = 3;
   const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
 
+  console.log(`Fetching ${symbol}...`);
   try {
     const res = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json',
-        'Accept-Encoding': 'identity' // force plain JSON, no gzip
-      },
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Accept-Encoding": "identity"
+      }
     });
-
-    if (!res.ok) {
-      console.error(`${symbol}: HTTP ${res.status}`);
-      return null;
-    }
 
     const text = await res.text();
 
-    // Sometimes Binance sends HTML or empty response — handle gracefully
-    if (!text || text[0] !== '[') {
-      console.error(`Error ${symbol}: Invalid data format (${text.slice(0, 80)})`);
-      return null;
+    // Print what Binance actually sent (first 300 chars)
+    console.log("Raw response (first 300 chars):");
+    console.log(text.slice(0, 300));
+
+    if (!text || text[0] !== "[") {
+      console.error(`Invalid data format`);
+      return;
     }
 
-    return JSON.parse(text);
-  } catch (e) {
-    console.error(`Error ${symbol}: ${e.message}`);
-    return null;
+    const data = JSON.parse(text);
+    console.log(`✅ Parsed ${data.length} entries successfully`);
+    console.log(data[0]);
+  } catch (err) {
+    console.error(`Error fetching ${symbol}: ${err.message}`);
   }
 }
+
+testBinance();
