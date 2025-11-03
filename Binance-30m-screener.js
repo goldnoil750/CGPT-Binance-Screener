@@ -1,4 +1,7 @@
 // Binance-30m-screener.js
+// Clean dark UI + Codetabs proxy for Binance Futures data
+// Works on Render.com with:  node Binance-30m-screener.js
+
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
@@ -7,132 +10,152 @@ const app = express();
 app.use(cors());
 
 const PORT = process.env.PORT || 10000;
+const REFRESH_DEFAULT = 60; // seconds
 
-// ------------------------------------------------------------
-// ✅ Config
-// ------------------------------------------------------------
-const symbols = [
-  "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
-  "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT",
-  "DOTUSDT", "LINKUSDT", "LTCUSDT", "TRXUSDT",
-  "UNIUSDT", "FILUSDT", "ATOMUSDT", "NEARUSDT"
+// Binance Perp pairs to scan (you can add more)
+const PAIRS = [
+  "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+  "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "PEPEUSDT", "WIFUSDT",
+  "BONKUSDT", "FLOKIUSDT", "1000RATSUSDT", "POPCATUSDT", "JUPUSDT", "PYTHUSDT"
 ];
 
-// ------------------------------------------------------------
-// ✅ Fetch last 3 candles via Codetabs proxy
-// ------------------------------------------------------------
-async function fetchKlines(symbol) {
+// Helper to compute body % and volume ratio
+function calcBodyPct(candle) {
+  const open = parseFloat(candle[1]);
+  const close = parseFloat(candle[4]);
+  return ((Math.abs(close - open)) / open * 100).toFixed(2);
+}
+
+function isGreen(candle) {
+  return parseFloat(candle[4]) > parseFloat(candle[1]);
+}
+
+// API Fetch via Codetabs proxy (works globally)
+async function fetchCandleData(symbol) {
   const url = `https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=3`;
-
   try {
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    const text = await res.text();
-    let data;
+    const res = await fetch(url);
+    const data = await res.json();
 
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      console.error(`❌ ${symbol}: JSON parse error`, text.slice(0, 100));
+    if (!Array.isArray(data) || data.length < 3) {
+      console.error(`Error ${symbol}: Invalid data format`);
       return null;
     }
 
-    if (!Array.isArray(data)) {
-      console.error(`⚠️ ${symbol}: Invalid data format`, data);
-      return null;
-    }
+    const c1 = data[data.length - 2]; // last closed
+    const c2 = data[data.length - 3]; // previous closed
 
-    return data;
+    const body1 = parseFloat(calcBodyPct(c1));
+    const body2 = parseFloat(calcBodyPct(c2));
+    const vol1 = parseFloat(c1[5]);
+    const vol2 = parseFloat(c2[5]);
+
+    if (isGreen(c1) && body1 >= 2) {
+      const ratio = vol2 > 0 ? (vol1 / vol2).toFixed(2) : 0;
+      return { symbol, volRatio: parseFloat(ratio), body1, body2, vol1, vol2 };
+    }
   } catch (err) {
-    console.error(`🚫 ${symbol}: Fetch failed`, err.message);
-    return null;
+    console.error(`Error ${symbol}: ${err.message}`);
   }
+  return null;
 }
 
-// ------------------------------------------------------------
-// ✅ Candle helpers
-// ------------------------------------------------------------
-function bodyPercent(c) {
-  return Math.abs(((parseFloat(c[4]) - parseFloat(c[1])) / parseFloat(c[1])) * 100);
-}
-function volume(c) {
-  return parseFloat(c[5]);
+async function getAllData() {
+  const results = await Promise.all(PAIRS.map(fetchCandleData));
+  return results.filter(Boolean).sort((a, b) => b.volRatio - a.volRatio);
 }
 
-// ------------------------------------------------------------
-// ✅ API endpoint
-// ------------------------------------------------------------
-app.get("/data", async (req, res) => {
-  const results = [];
-
-  for (const symbol of symbols) {
-    const d = await fetchKlines(symbol);
-    if (!d) continue;
-
-    const prev = d[d.length - 2];
-    const curr = d[d.length - 1];
-    const body = bodyPercent(curr).toFixed(2);
-    const volRatio = volume(curr) && volume(d[d.length - 2])
-      ? (volume(curr) / volume(d[d.length - 2])).toFixed(2)
-      : 0;
-
-    results.push({
-      symbol,
-      body: Number(body),
-      volNow: volume(curr),
-      volPrev: volume(d[d.length - 2]),
-      volRatio: Number(volRatio)
-    });
-  }
-
-  res.json(results);
-});
-
-// ------------------------------------------------------------
-// ✅ Simple HTML frontend
-// ------------------------------------------------------------
+// Web UI
 app.get("/", async (req, res) => {
+  const data = await getAllData();
+
+  // Calculate countdown to next 30-min candle
   const now = new Date();
-  const mins = (30 - (now.getUTCMinutes() % 30)) % 30;
-  const secs = 60 - now.getUTCSeconds();
+  const minsToNext = 30 - (now.getMinutes() % 30);
+  const secsToNext = 60 - now.getSeconds();
+  const countdown = `${String(minsToNext % 30).padStart(2, "0")}:${String(secsToNext % 60).padStart(2, "0")}`;
 
   const html = `
   <html>
   <head>
     <title>Binance 30m Screener</title>
     <style>
-      body { background:#000; color:#0f0; font-family:monospace; font-size:18px; }
-      table { border-collapse:collapse; width:100%; margin-top:10px; }
-      th,td { border-bottom:1px solid #0f0; padding:6px 10px; text-align:left; }
+      body { background-color: #1e1e1e; color: #eaeaea; font-family: Arial, sans-serif; text-align: center; }
+      table { margin: 20px auto; border-collapse: collapse; width: 90%; }
+      th, td { border: 1px solid #444; padding: 8px 10px; }
+      th { background-color: #333; }
+      tr:nth-child(even) { background-color: #2a2a2a; }
+      tr:hover { background-color: #3a3a3a; }
+      #controls { margin: 15px; }
+      button { background-color: #555; color: white; padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; }
+      button:hover { background-color: #777; }
+      input { width: 50px; text-align: center; background-color: #333; color: white; border: 1px solid #555; border-radius: 3px; }
     </style>
   </head>
   <body>
-    <h2>BINANCE 30m PERP SCREENER (via Codetabs)</h2>
-    <h3 id="timer">Next candle: ${mins.toString().padStart(2,"0")}:${secs.toString().padStart(2,"0")} mm:ss</h3>
-    <table id="tbl"><tr><th>PAIR</th><th>Body%</th><th>VolNow</th><th>VolPrev</th><th>Ratio</th></tr></table>
-    <script>
-      async function load(){
-        try {
-          const r = await fetch('/data');
-          const d = await r.json();
-          const tbl = document.getElementById('tbl');
-          tbl.innerHTML = '<tr><th>PAIR</th><th>Body%</th><th>VolNow</th><th>VolPrev</th><th>Ratio</th></tr>' +
-            d.map(x => '<tr><td>'+x.symbol+'</td><td>'+x.body+'</td><td>'+x.volNow.toFixed(0)+'</td><td>'+x.volPrev.toFixed(0)+'</td><td>'+x.volRatio+'</td></tr>').join('');
-        } catch(e){ console.error(e); }
-      }
-      load(); setInterval(load, 60000);
+    <h1>Binance 30-min Screener</h1>
+    <h3>Next 30-min candle in: <span id="count">${countdown}</span></h3>
+    <div id="controls">
+      Auto-refresh every <input id="refreshInt" value="${REFRESH_DEFAULT}" /> sec
+      <button onclick="applyRefresh()">Apply</button>
+      <button onclick="manualRefresh()">🔄 Refresh Now</button>
+      <p id="timer"></p>
+    </div>
+    <table>
+      <tr>
+        <th>Pair</th>
+        <th>Vol Ratio</th>
+        <th>Body(1)%</th>
+        <th>Body(2)%</th>
+        <th>Vol(1)</th>
+        <th>Vol(2)</th>
+      </tr>
+      ${data.length
+        ? data
+            .map(
+              (r) => `
+              <tr>
+                <td style="text-align:left">${r.symbol}</td>
+                <td>${r.volRatio}</td>
+                <td>${r.body1}</td>
+                <td>${r.body2}</td>
+                <td>${(r.vol1 / 1_000_000).toFixed(1)}M</td>
+                <td>${(r.vol2 / 1_000_000).toFixed(1)}M</td>
+              </tr>`
+            )
+            .join("")
+        : `<tr><td colspan="6">No GREEN ≥2% candles found</td></tr>`}
+    </table>
 
-      // Countdown
-      let mm=${mins}, ss=${secs};
-      setInterval(()=>{
-        if(--ss<0){ss=59; if(mm>0)mm--;}
-        document.getElementById('timer').innerText = 
-          'Next candle: '+String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0')+' mm:ss';
-      },1000);
+    <script>
+      let countdown = ${REFRESH_DEFAULT};
+      let interval = ${REFRESH_DEFAULT};
+      let timerEl = document.getElementById('timer');
+
+      function updateTimer() {
+        countdown--;
+        timerEl.innerText = "Auto refresh in: " + countdown + " sec";
+        if (countdown <= 0) location.reload();
+      }
+
+      let t = setInterval(updateTimer, 1000);
+
+      function applyRefresh() {
+        clearInterval(t);
+        interval = parseInt(document.getElementById('refreshInt').value) || 60;
+        countdown = interval;
+        t = setInterval(updateTimer, 1000);
+      }
+
+      function manualRefresh() {
+        location.reload();
+      }
     </script>
   </body>
-  </html>`;
+  </html>
+  `;
+
   res.send(html);
 });
 
-// ------------------------------------------------------------
 app.listen(PORT, () => console.log(`✅ Server running on ${PORT}`));
