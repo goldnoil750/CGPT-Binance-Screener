@@ -1,11 +1,15 @@
 {
   "name": "binance-30m-screener",
+  "version": "1.0.0",
+  "description": "Binance 30m screener live web app",
   "type": "module",
-  "dependencies": {
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
-  },
+  "main": "Binance-30m-screener.js",
   "scripts": {
     "start": "node Binance-30m-screener.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "node-fetch": "^3.3.2"
   }
 }
