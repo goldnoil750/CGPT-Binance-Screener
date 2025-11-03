@@ -1,201 +1,175 @@
-// Repo: binance-30m-screener
-// Files in this single server.js (serves frontend + API).
-// How to use:
-// 1) Create repo on GitHub and add this file as server.js
-// 2) Add package.json contents shown below
-// 3) Deploy on Render (Node service) or run locally: `npm install` then `node server.js`
+import express from "express";
+import fetch from "node-fetch";
 
-/* package.json
-{
-  "name": "binance-30m-screener",
-  "version": "1.0.0",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5"
-  }
-}
-*/
-
-// server.js
-const express = require('express');
-const cors = require('cors');
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(express.static("public"));
 
-app.use(cors());
-app.use(express.json());
-
-// Simple in-memory caches
-let cachedExchangeInfo = {ts:0, data:null};
-let cached24h = {ts:0, data:null};
-
-const BINANCE_FUTURES = 'https://fapi.binance.com';
-
-async function fetchJSON(url){
+async function fetchJSON(url) {
   const res = await fetch(url);
-  if(!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+  return await res.json();
 }
 
-async function getExchangeInfo(){
-  const now = Date.now();
-  if(cachedExchangeInfo.data && (now - cachedExchangeInfo.ts) < 60*60*1000) return cachedExchangeInfo.data;
-  const data = await fetchJSON(`${BINANCE_FUTURES}/fapi/v1/exchangeInfo`);
-  cachedExchangeInfo = {ts: now, data};
-  return data;
+// 🧠 Get Binance Perp pairs list (USDT only)
+async function getPerpPairs() {
+  const url =
+    "https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/exchangeInfo";
+  const data = await fetchJSON(url);
+  return data.symbols
+    .filter((s) => s.contractType === "PERPETUAL" && s.symbol.endsWith("USDT"))
+    .map((s) => s.symbol);
 }
 
-async function get24hTickers(){
-  const now = Date.now();
-  if(cached24h.data && (now - cached24h.ts) < 60*1000) return cached24h.data; // refresh each minute
-  const data = await fetchJSON(`${BINANCE_FUTURES}/fapi/v1/ticker/24hr`);
-  cached24h = {ts: now, data};
-  return data;
+// 📊 Get last 3 closed 30m candles (we use Candle(1) & Candle(2))
+async function getKlines(symbol) {
+  const url = `https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=3`;
+  const data = await fetchJSON(url);
+  return data.map((k) => ({
+    open: parseFloat(k[1]),
+    high: parseFloat(k[2]),
+    low: parseFloat(k[3]),
+    close: parseFloat(k[4]),
+    volume: parseFloat(k[5]),
+  }));
 }
 
-function sleep(ms){ return new Promise(res=>setTimeout(res, ms)); }
-
-// Fetch klines for a symbol: we request 3 candles to have candle(0 ongoing), candle(1) last closed, candle(2) previous
-async function getLast30mCandles(symbol){
-  const url = `${BINANCE_FUTURES}/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=3`;
-  return fetchJSON(url);
+// 🧮 Calculate body %
+function bodyPct(c) {
+  return ((c.close - c.open) / c.open) * 100;
 }
 
-// API: /api/scan?limit=200 -- returns list of pairs matching rule
-app.get('/api/scan', async (req,res)=>{
-  try{
-    const limit = parseInt(req.query.limit)||200;
-    const exchange = await getExchangeInfo();
-    // filter perpetual symbols
-    const perpSymbols = exchange.symbols.filter(s => s.contractType === 'PERPETUAL').map(s=>s.symbol);
+// 🚀 Main screener logic
+async function getScreenerData() {
+  const pairs = await getPerpPairs();
+  const results = [];
 
-    const tickers = await get24hTickers();
-    // filter tickers to perpSymbols and sort by quoteVolume desc
-    const filtered = tickers.filter(t=>perpSymbols.includes(t.symbol));
-    filtered.sort((a,b)=>parseFloat(b.quoteVolume||b.quoteQty||b.quoteVolume) - parseFloat(a.quoteVolume||a.quoteQty||a.quoteVolume));
-    const top = filtered.slice(0, limit).map(t=>t.symbol);
+  for (const symbol of pairs) {
+    try {
+      const kl = await getKlines(symbol);
+      const c2 = kl[0]; // candle(2)
+      const c1 = kl[1]; // candle(1)
+      const body1 = bodyPct(c1);
+      const body2 = bodyPct(c2);
 
-    const results = [];
-
-    // Throttle requests in small batches to be polite to Binance rate limits
-    const BATCH = 8;
-    for(let i=0;i<top.length;i+=BATCH){
-      const batch = top.slice(i,i+BATCH);
-      const promises = batch.map(async (sym)=>{
-        try{
-          const kl = await getLast30mCandles(sym); // array of 3 klines
-          if(!Array.isArray(kl) || kl.length < 3) return null;
-          // kline format: [openTime, open, high, low, close, volume, closeTime, quoteAssetVolume, trades, ...]
-          const k0 = kl[2]; // oldest of returned (closed 2)
-          const k1 = kl[1]; // closed 1 (last closed)
-          // compute body percent
-          const open1 = parseFloat(k1[1]);
-          const close1 = parseFloat(k1[4]);
-          const open2 = parseFloat(k0[1]);
-          const close2 = parseFloat(k0[4]);
-          const vol1 = parseFloat(k1[5]);
-          const vol2 = parseFloat(k0[5]);
-          const body1_pct = ((close1 - open1)/open1)*100;
-          const body2_pct = ((close2 - open2)/open2)*100;
-          const isGreen1 = close1 > open1;
-          // Rule: last closed (candle1) must be GREEN and body% >= 2%
-          if(!isGreen1) return null;
-          if(Math.abs(body1_pct) < 2) return null;
-          // compute volume ratio = vol2 / vol1 (as specified)
-          const volRatio = vol2 / (vol1 || 1);
-          return {
-            symbol: sym,
-            volRatio: Number(volRatio.toFixed(4)),
-            body1_pct: Number(body1_pct.toFixed(3)),
-            body2_pct: Number(body2_pct.toFixed(3)),
-            vol1: Number(vol1.toFixed(6)),
-            vol2: Number(vol2.toFixed(6))
-          };
-        }catch(err){
-          return null;
-        }
-      });
-
-      const settled = await Promise.all(promises);
-      settled.forEach(s=>{ if(s) results.push(s); });
-      // small pause between batches
-      await sleep(300);
+      // Only if Candle(1) is GREEN and ≥2%
+      if (body1 >= 2) {
+        const volRatio = c2.volume / c1.volume;
+        results.push({
+          symbol,
+          volRatio: volRatio.toFixed(2),
+          body1_pct: body1.toFixed(2),
+          body2_pct: body2.toFixed(2),
+          vol1: c1.volume.toFixed(0),
+          vol2: c2.volume.toFixed(0),
+        });
+      }
+    } catch (e) {
+      console.error(`Error ${symbol}:`, e.message);
     }
+  }
 
-    // sort descending by volRatio
-    results.sort((a,b)=>b.volRatio - a.volRatio);
-    res.json({ts: Date.now(), count: results.length, results});
-  }catch(err){
-    res.status(500).json({error: err.message});
+  // Sort by Volume Ratio descending
+  results.sort((a, b) => b.volRatio - a.volRatio);
+  return results;
+}
+
+// 🧾 Endpoint for browser
+app.get("/data", async (req, res) => {
+  try {
+    const data = await getScreenerData();
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
   }
 });
 
-// Serve frontend
-app.get('/', (req,res)=>{
-  res.type('html').send(`<!doctype html>
+// 🖥️ Web UI
+app.get("/", (req, res) => {
+  res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <title>Binance 30m Screener</title>
-  <style>body{font-family:Arial,Helvetica,sans-serif;padding:12px} table{border-collapse:collapse;width:100%} th,td{border:1px solid #ddd;padding:8px;text-align:right} th{background:#f4f4f4;text-align:left} #controls{margin-bottom:10px}</style>
+<title>Binance Perp 30-min Screener</title>
+<style>
+body { font-family: Arial; margin: 20px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
+th { background: #f5f5f5; }
+</style>
 </head>
 <body>
-  <h2>Binance Perp 30-min Screener</h2>
-  <div id="controls">
-    Refresh (sec): <input id="interval" value="60" style="width:80px"> 
-    <button id="apply">Apply</button>
-    <button id="refresh">Refresh Now</button>
-    Next scan in: <span id="countdown">--</span>
-  </div>
-  <table id="tbl">
-    <thead><tr><th>Pair Name</th><th>Vol Ratio</th><th>Body(1)%</th><th>Body(2)%</th><th>Vol(1)</th><th>Vol(2)</th></tr></thead>
-    <tbody></tbody>
-  </table>
-  <script>
-    let intervalSec = 60;
-    let countdown = intervalSec;
-    const td = document.querySelector('#tbl tbody');
-    const cd = document.getElementById('countdown');
-    const input = document.getElementById('interval');
-    document.getElementById('apply').onclick = ()=>{
-      const v = parseInt(input.value)||60; intervalSec = v; countdown = v; updateCountdownDisplay();
+<h2>Binance Perp 30-min Screener</h2>
+Refresh (sec): <input id="interval" type="number" value="60" style="width:70px">
+<button onclick="applyInterval()">Apply</button>
+<button onclick="loadData()">Refresh Now</button>
+<span id="countdown"></span>
+<br><br>
+<table id="dataTable">
+<thead>
+<tr>
+<th>Pair Name</th>
+<th>Vol Ratio</th>
+<th>Body(1)%</th>
+<th>Body(2)%</th>
+<th>Vol(1)</th>
+<th>Vol(2)</th>
+</tr>
+</thead>
+<tbody></tbody>
+</table>
+<script>
+let refreshInterval = 60;
+let countdown = refreshInterval;
+let timerId;
+
+function applyInterval() {
+  const val = parseInt(document.getElementById('interval').value);
+  if (val > 5) {
+    refreshInterval = val;
+    countdown = val;
+  }
+}
+
+async function loadData() {
+  document.querySelector("#dataTable tbody").innerHTML = "<tr><td colspan='6'>Loading...</td></tr>";
+  try {
+    const res = await fetch('/data');
+    const js = await res.json();
+    const tbody = document.querySelector("#dataTable tbody");
+    tbody.innerHTML = '';
+    if (js.ok && js.data.length > 0) {
+      js.data.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = \`<td style="text-align:left">\${r.symbol}</td><td>\${r.volRatio}</td><td>\${r.body1_pct}</td><td>\${r.body2_pct}</td><td>\${r.vol1}</td><td>\${r.vol2}</td>\`;
+        tbody.appendChild(tr);
+      });
+    } else {
+      tbody.innerHTML = '<tr><td colspan="6">No data</td></tr>';
     }
-    document.getElementById('refresh').onclick = ()=>{ fetchAndRender(); countdown = intervalSec; }
+  } catch(e) {
+    console.error(e);
+    document.querySelector("#dataTable tbody").innerHTML = '<tr><td colspan="6">Error fetching data</td></tr>';
+  }
+}
 
-    function updateCountdownDisplay(){ cd.innerText = countdown + 's'; }
-
-    async function fetchAndRender(){
-      try{
-        const res = await fetch('/api/scan?limit=200');
-        const j = await res.json();
-        const rows = j.results || [];
-        td.innerHTML = '';
-        rows.forEach((r,idx)=>{
-          const tr = document.createElement('tr');
-          tr.innerHTML = '<td style="text-align:left">' + r.symbol + '</td><td>' + r.volRatio + '</td><td>' + r.body1_pct + '</td><td>' + r.body2_pct + '</td><td>' + r.vol1 + '</td><td>' + r.vol2 + '</td>';
-          td.appendChild(tr);
-        });
-      }catch(err){ console.error(err); }
+function startTimer() {
+  if (timerId) clearInterval(timerId);
+  timerId = setInterval(() => {
+    document.getElementById('countdown').textContent = 'Next scan in: ' + countdown + 's';
+    countdown--;
+    if (countdown <= 0) {
+      countdown = refreshInterval;
+      loadData();
     }
+  }, 1000);
+}
 
-    // auto-run on load then every countdown
-    (function startLoop(){
-      fetchAndRender();
-      countdown = intervalSec;
-      updateCountdownDisplay();
-      setInterval(()=>{
-        countdown -= 1;
-        if(countdown <= 0){ fetchAndRender(); countdown = intervalSec; }
-        updateCountdownDisplay();
-      }, 1000);
-    })();
-  </script>
+loadData();
+startTimer();
+</script>
 </body>
 </html>`);
 });
 
-app.listen(PORT, ()=> console.log(`Server listening on ${PORT}`));
+// Render port
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log("Server running on port", PORT));
