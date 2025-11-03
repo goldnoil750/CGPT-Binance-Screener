@@ -1,0 +1,12 @@
+{
+  "name": "binance-30m-screener",
+  "version": "1.0.0",
+  "main": "Binance-30m-screener",
+  "scripts": {
+    "start": "node Binance-30m-screener"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}
