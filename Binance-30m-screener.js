@@ -1,161 +1,164 @@
-// Binance-30m-screener.js
-// Clean dark UI + Codetabs proxy for Binance Futures data
-// Works on Render.com with:  node Binance-30m-screener.js
-
 import express from "express";
 import fetch from "node-fetch";
-import cors from "cors";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const app = express();
-app.use(cors());
-
 const PORT = process.env.PORT || 10000;
-const REFRESH_DEFAULT = 60; // seconds
 
-// Binance Perp pairs to scan (you can add more)
-const PAIRS = [
-  "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
-  "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "PEPEUSDT", "WIFUSDT",
-  "BONKUSDT", "FLOKIUSDT", "1000RATSUSDT", "POPCATUSDT", "JUPUSDT", "PYTHUSDT"
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// serve static files
+app.use(express.static(__dirname));
+
+// ======== CONFIG ========
+const symbols = [
+  "BTCUSDT",
+  "ETHUSDT",
+  "BNBUSDT",
+  "SOLUSDT",
+  "DOGEUSDT",
+  "XRPUSDT",
+  "ADAUSDT",
+  "LINKUSDT",
+  "AVAXUSDT",
+  "DOTUSDT"
 ];
+const interval = "30m";
 
-// Helper to compute body % and volume ratio
-function calcBodyPct(candle) {
-  const open = parseFloat(candle[1]);
-  const close = parseFloat(candle[4]);
-  return ((Math.abs(close - open)) / open * 100).toFixed(2);
-}
-
-function isGreen(candle) {
-  return parseFloat(candle[4]) > parseFloat(candle[1]);
-}
-
-// API Fetch via Codetabs proxy (works globally)
-async function fetchCandleData(symbol) {
-  const url = `https://api.codetabs.com/v1/proxy/?quest=https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=3`;
+// ======== FETCH LOGIC ========
+async function getKline(symbol) {
+  const url = `https://api.codetabs.com/v1/proxy?quest=https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=3`;
   try {
-    const res = await fetch(url);
-    const data = await res.json();
-
-    if (!Array.isArray(data) || data.length < 3) {
-      console.error(`Error ${symbol}: Invalid data format`);
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      console.log(`❌ ${symbol} - Invalid JSON:`, text.slice(0, 200));
+      return null;
+    }
+    if (!Array.isArray(data)) {
+      console.log(`❌ ${symbol} - Invalid data format`, data);
       return null;
     }
 
-    const c1 = data[data.length - 2]; // last closed
-    const c2 = data[data.length - 3]; // previous closed
-
-    const body1 = parseFloat(calcBodyPct(c1));
-    const body2 = parseFloat(calcBodyPct(c2));
-    const vol1 = parseFloat(c1[5]);
-    const vol2 = parseFloat(c2[5]);
-
-    if (isGreen(c1) && body1 >= 2) {
-      const ratio = vol2 > 0 ? (vol1 / vol2).toFixed(2) : 0;
-      return { symbol, volRatio: parseFloat(ratio), body1, body2, vol1, vol2 };
-    }
+    const [openTime, open, high, low, close] = data[data.length - 2]; // last completed candle
+    const pct = ((close - open) / open) * 100;
+    return {
+      symbol,
+      open: parseFloat(open),
+      close: parseFloat(close),
+      change: pct.toFixed(2)
+    };
   } catch (err) {
-    console.error(`Error ${symbol}: ${err.message}`);
+    console.log(`❌ ${symbol} error:`, err.message);
+    return null;
   }
-  return null;
 }
 
-async function getAllData() {
-  const results = await Promise.all(PAIRS.map(fetchCandleData));
-  return results.filter(Boolean).sort((a, b) => b.volRatio - a.volRatio);
-}
-
-// Web UI
-app.get("/", async (req, res) => {
-  const data = await getAllData();
-
-  // Calculate countdown to next 30-min candle
-  const now = new Date();
-  const minsToNext = 30 - (now.getMinutes() % 30);
-  const secsToNext = 60 - now.getSeconds();
-  const countdown = `${String(minsToNext % 30).padStart(2, "0")}:${String(secsToNext % 60).padStart(2, "0")}`;
-
-  const html = `
-  <html>
-  <head>
-    <title>Binance 30m Screener</title>
-    <style>
-      body { background-color: #1e1e1e; color: #eaeaea; font-family: Arial, sans-serif; text-align: center; }
-      table { margin: 20px auto; border-collapse: collapse; width: 90%; }
-      th, td { border: 1px solid #444; padding: 8px 10px; }
-      th { background-color: #333; }
-      tr:nth-child(even) { background-color: #2a2a2a; }
-      tr:hover { background-color: #3a3a3a; }
-      #controls { margin: 15px; }
-      button { background-color: #555; color: white; padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; }
-      button:hover { background-color: #777; }
-      input { width: 50px; text-align: center; background-color: #333; color: white; border: 1px solid #555; border-radius: 3px; }
-    </style>
-  </head>
-  <body>
-    <h1>Binance 30-min Screener</h1>
-    <h3>Next 30-min candle in: <span id="count">${countdown}</span></h3>
-    <div id="controls">
-      Auto-refresh every <input id="refreshInt" value="${REFRESH_DEFAULT}" /> sec
-      <button onclick="applyRefresh()">Apply</button>
-      <button onclick="manualRefresh()">🔄 Refresh Now</button>
-      <p id="timer"></p>
-    </div>
-    <table>
-      <tr>
-        <th>Pair</th>
-        <th>Vol Ratio</th>
-        <th>Body(1)%</th>
-        <th>Body(2)%</th>
-        <th>Vol(1)</th>
-        <th>Vol(2)</th>
-      </tr>
-      ${data.length
-        ? data
-            .map(
-              (r) => `
-              <tr>
-                <td style="text-align:left">${r.symbol}</td>
-                <td>${r.volRatio}</td>
-                <td>${r.body1}</td>
-                <td>${r.body2}</td>
-                <td>${(r.vol1 / 1_000_000).toFixed(1)}M</td>
-                <td>${(r.vol2 / 1_000_000).toFixed(1)}M</td>
-              </tr>`
-            )
-            .join("")
-        : `<tr><td colspan="6">No GREEN ≥2% candles found</td></tr>`}
-    </table>
-
-    <script>
-      let countdown = ${REFRESH_DEFAULT};
-      let interval = ${REFRESH_DEFAULT};
-      let timerEl = document.getElementById('timer');
-
-      function updateTimer() {
-        countdown--;
-        timerEl.innerText = "Auto refresh in: " + countdown + " sec";
-        if (countdown <= 0) location.reload();
-      }
-
-      let t = setInterval(updateTimer, 1000);
-
-      function applyRefresh() {
-        clearInterval(t);
-        interval = parseInt(document.getElementById('refreshInt').value) || 60;
-        countdown = interval;
-        t = setInterval(updateTimer, 1000);
-      }
-
-      function manualRefresh() {
-        location.reload();
-      }
-    </script>
-  </body>
-  </html>
-  `;
-
-  res.send(html);
+// ======== API ENDPOINT ========
+app.get("/data", async (req, res) => {
+  const results = [];
+  for (const s of symbols) {
+    const d = await getKline(s);
+    if (d) results.push(d);
+  }
+  res.json({ updated: new Date().toISOString(), data: results });
 });
 
+// ======== FRONT-END HTML ========
+app.get("/", (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Binance 30m Screener</title>
+  <style>
+    body {
+      background-color: #1c1c1c;
+      color: #e0e0e0;
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 0;
+      padding: 0;
+    }
+    h1 {
+      color: #00ffc8;
+      margin: 20px 0;
+    }
+    table {
+      margin: 0 auto;
+      border-collapse: collapse;
+      width: 80%;
+      background: #2a2a2a;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 0 10px #00000055;
+    }
+    th, td {
+      padding: 12px;
+      border-bottom: 1px solid #333;
+    }
+    th {
+      background: #333;
+      color: #00ffc8;
+    }
+    tr:hover { background-color: #383838; }
+    button {
+      background: #00ffc8;
+      color: #000;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      margin: 20px;
+    }
+    button:hover { background: #00cc99; }
+    #updated {
+      margin: 10px;
+      color: #aaa;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Binance 30m Screener (Perp Test)</h1>
+  <button onclick="loadData()">🔄 Refresh</button>
+  <div id="updated">Loading...</div>
+  <table id="tbl">
+    <thead>
+      <tr><th>Symbol</th><th>Open</th><th>Close</th><th>Change %</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    async function loadData() {
+      document.getElementById("updated").textContent = "Fetching...";
+      const res = await fetch('/data');
+      const js = await res.json();
+      const tbody = document.querySelector("#tbl tbody");
+      tbody.innerHTML = '';
+      for (const d of js.data) {
+        const row = document.createElement('tr');
+        row.innerHTML = \`<td>\${d.symbol}</td>
+                         <td>\${d.open.toFixed(2)}</td>
+                         <td>\${d.close.toFixed(2)}</td>
+                         <td style="color:\${d.change >= 0 ? '#00ff88':'#ff6666'}">\${d.change}%</td>\`;
+        tbody.appendChild(row);
+      }
+      document.getElementById("updated").textContent = "Last updated: " + new Date(js.updated).toLocaleTimeString();
+    }
+    loadData();
+  </script>
+</body>
+</html>
+  `);
+});
+
+// ======== START SERVER ========
 app.listen(PORT, () => console.log(`✅ Server running on ${PORT}`));
