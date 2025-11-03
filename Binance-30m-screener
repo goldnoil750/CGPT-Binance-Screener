@@ -176,7 +176,7 @@ app.get('/', (req,res)=>{
         td.innerHTML = '';
         rows.forEach((r,idx)=>{
           const tr = document.createElement('tr');
-          tr.innerHTML = `<td style="text-align:left">${r.symbol}</td><td>${r.volRatio}</td><td>${r.body1_pct}</td><td>${r.body2_pct}</td><td>${r.vol1}</td><td>${r.vol2}</td>`;
+          tr.innerHTML = '<td style="text-align:left">' + r.symbol + '</td><td>' + r.volRatio + '</td><td>' + r.body1_pct + '</td><td>' + r.body2_pct + '</td><td>' + r.vol1 + '</td><td>' + r.vol2 + '</td>';
           td.appendChild(tr);
         });
       }catch(err){ console.error(err); }
